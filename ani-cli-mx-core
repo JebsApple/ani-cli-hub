@@ -91,6 +91,11 @@ help_info() {
         Show weekly anime schedule from JkAnime with thumbnails
       --browse
         Browse the anime catalog as a scrollable thumbnail card grid
+        (keys: f toggle favorite, w cycle watchlist state)
+      --favs
+        Browse only your favorites (marked with f)
+      --watchlist
+        Browse only your watchlist (pendiente/viendo/completado)
       --rofi
         Use rofi instead of fzf for the interactive menu
       --dmenu
@@ -897,31 +902,100 @@ fetch_recent_releases() {
         done
 }
 
+# ponytail: cache persistente (latencia) — catalogo TTL 6h, thumbs inmutables por slug
+ani_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/ani-cli-mx"
+
 # ponytail: catalogo desde jkanime (animeflv de capa caida) — reusa el scraper del
 # horario semanal y deduplica slugs. output file: slug\ttitle\tep_no\tthumb_url
+# Con cache: catalogo <6h y thumbs ya bajados = arranque casi instantaneo.
 fetch_browse_catalog() {
-    local tmpdir catalog_file
-    fetch_weekly_schedule || return 1
-    [ -s "$SCHEDULE_FILE" ] || return 1
-    tmpdir="$SCHEDULE_TMPDIR"
-    catalog_file=$(mktemp) || { rm -rf "$tmpdir"; return 1; }
-    # schedule: slug\ttitle\tdayslug\tthumb\tepcap → catalogo: slug\ttitle\tep\tthumb
-    awk -F'\t' '!seen[$1]++ { printf "%s\t%s\t%s\t%s\n", $1, $2, $5, $4 }' \
-        "$SCHEDULE_FILE" > "$catalog_file"
-    rm -f "$SCHEDULE_FILE" 2>/dev/null
-    [ -s "$catalog_file" ] || { rm -f "$catalog_file"; rm -rf "$tmpdir"; return 1; }
+    local catalog_cache="$ani_cache_dir/catalog.tsv" thumbs_dir="$ani_cache_dir/thumbs"
+    mkdir -p "$thumbs_dir"
+    # cache fresco? (mtime < 6h)
+    if [ -s "$catalog_cache" ] && [ -n "$(find "$catalog_cache" -mmin -360 2>/dev/null)" ]; then
+        export CATALOG_FILE="$catalog_cache"
+        export CATALOG_TMPDIR="$thumbs_dir"
+    else
+        fetch_weekly_schedule || { # red caida: usar cache viejo si existe
+            [ -s "$catalog_cache" ] && export CATALOG_FILE="$catalog_cache" &&
+                export CATALOG_TMPDIR="$thumbs_dir" && return 0
+            return 1
+        }
+        [ -s "$SCHEDULE_FILE" ] || return 1
+        # schedule: slug\ttitle\tdayslug\tthumb\tepcap → catalogo: slug\ttitle\tep\tthumb
+        awk -F'\t' '!seen[$1]++ { printf "%s\t%s\t%s\t%s\n", $1, $2, $5, $4 }' \
+            "$SCHEDULE_FILE" > "$catalog_cache"
+        rm -f "$SCHEDULE_FILE" 2>/dev/null
+        rm -rf "$SCHEDULE_TMPDIR" 2>/dev/null
+        export CATALOG_FILE="$catalog_cache"
+        export CATALOG_TMPDIR="$thumbs_dir"
+    fi
+    # bajar solo thumbs faltantes (los presentes son inmutables por slug)
     local slug thumb img_path pids_file
     pids_file=$(mktemp)
     while IFS=$'\t' read -r slug _ _ thumb; do
-        img_path="${tmpdir}/${slug}.jpg"
-        [ -f "$img_path" ] && continue
-        curl -s -o "$img_path" "$thumb" &
+        img_path="${thumbs_dir}/${slug}.jpg"
+        [ -s "$img_path" ] && continue
+        curl -s -f -o "$img_path" "$thumb" &
         echo $! >> "$pids_file"
-    done < "$catalog_file"
+    done < "$CATALOG_FILE"
     while read -r pid; do wait "$pid" 2>/dev/null; done < "$pids_file"
     rm -f "$pids_file"
-    export CATALOG_FILE="$catalog_file"
-    export CATALOG_TMPDIR="$tmpdir"
+}
+
+# ── favoritos y watchlist ──────────────────────────────────────────────
+# archivos hermanos del histfile, mismo formato tab. id con prefijo de fuente.
+ani_fav_has() { [ -f "$hist_dir/ani-favs" ] && grep -q "^$1	" "$hist_dir/ani-favs"; }
+ani_fav_toggle() { # $1 id  $2 title
+    local f="$hist_dir/ani-favs"
+    if ani_fav_has "$1"; then
+        grep -v "^$1	" "$f" > "$f.new"; mv "$f.new" "$f"   # grep exit 1 si queda vacio: mv igual
+    else
+        printf '%s\t%s\n' "$1" "$2" >> "$f"
+    fi
+}
+ani_watch_state() { # $1 id → imprime estado o nada
+    [ -f "$hist_dir/ani-watchlist" ] &&
+        awk -F'\t' -v id="$1" '$1 == id { print $3; exit }' "$hist_dir/ani-watchlist"
+}
+ani_watch_cycle() { # $1 id  $2 title — (nada)→pendiente→viendo→completado→(nada)
+    local f="$hist_dir/ani-watchlist" cur next
+    cur=$(ani_watch_state "$1")
+    case "$cur" in
+        "") next="pendiente" ;;
+        pendiente) next="viendo" ;;
+        viendo) next="completado" ;;
+        completado) next="" ;;
+    esac
+    if [ -f "$f" ]; then
+        grep -v "^$1	" "$f" > "$f.new"; mv "$f.new" "$f"   # grep exit 1 si queda vacio: mv igual
+    fi
+    [ -n "$next" ] && printf '%s\t%s\t%s\n' "$1" "$2" "$next" >> "$f"
+    printf '%s' "$next"
+}
+
+# ponytail: linea 2 de tarjeta de catalogo con marcas de fav/estado
+catalog_card_l2() { # $1 id  $2 ep
+    local l2="Ep $2"
+    ani_fav_has "$1" && l2="$l2 ♥"
+    local st; st=$(ani_watch_state "$1")
+    [ -n "$st" ] && l2="$l2 [$st]"
+    printf '%s' "$l2"
+}
+
+# ponytail: handler de teclas f/w del grid de catalogo — devuelve nueva linea 2
+browse_grid_key() { # $1 key  $2 entry TSV (img,title,l2,slug,imgpath,ep)
+    local slug title ep id
+    slug=$(printf '%s' "$2" | cut -f4)
+    title=$(printf '%s' "$2" | cut -f2)
+    ep=$(printf '%s' "$2" | cut -f6)
+    id="jkanime:${slug}"
+    case "$1" in
+        f) ani_fav_toggle "$id" "$title" ;;
+        w) ani_watch_cycle "$id" "$title" >/dev/null ;;
+        *) return 1 ;;
+    esac
+    catalog_card_l2 "$id" "$ep"
 }
 
 # ponytail: kitty graphics disponibles? (pixeles reales vs simbolos chafa)
@@ -1032,10 +1106,12 @@ show_card_grid() {
         tput cup $(( cy + img_h + 2 )) $(( cx + 2 )) >/dev/tty; printf '%s%s%s' "$c_meta" "$t2" "$c_r" >/dev/tty
     }
     _cg_header() {
+        local extra=""
+        [ -n "$CG_ON_KEY" ] && extra=" · f ♥ · w lista"
         tput cup 0 "$margin_x" >/dev/tty
         tput el >/dev/tty
-        printf '%s%s%s · %d títulos · fila %d/%d %s· ←↑↓→ mover · Enter ver · q salir%s' \
-            "$c_accent" "$header_label" "$c_r$c_title" "$total" $(( sel / ncols + 1 )) "$vrows" "$c_meta" "$c_r" >/dev/tty
+        printf '%s%s%s · %d títulos · fila %d/%d %s· ←↑↓→ mover · Enter ver%s · q salir%s' \
+            "$c_accent" "$header_label" "$c_r$c_title" "$total" $(( sel / ncols + 1 )) "$vrows" "$c_meta" "$extra" "$c_r" >/dev/tty
     }
     _cg_paint() {
         clear >/dev/tty
@@ -1137,6 +1213,17 @@ show_card_grid() {
             $'\033[A'|k) _cg_move $(( sel - ncols )) ;;
             $'\033[6'|G) _cg_move $(( total - 1 )) ;;   # PgDn/G → final
             $'\033[5'|g) _cg_move 0 ;;                  # PgUp/g → inicio
+            f|w)
+                # hook opcional del caller: CG_ON_KEY procesa la tecla y devuelve nueva linea 2
+                if [ -n "$CG_ON_KEY" ]; then
+                    entry="${entries[$sel]}"
+                    local new_l2
+                    if new_l2=$("$CG_ON_KEY" "$key" "$entry"); then
+                        entries[$sel]=$(printf '%s' "$entry" |
+                            awk -F'\t' -v OFS='\t' -v l2="$new_l2" '{ $3 = l2; print }')
+                        _cg_card $(( sel - top * ncols )) "$sel"
+                    fi
+                fi ;;
             ''|$'\n')
                 entry="${entries[$sel]}"
                 _cg_cleanup
@@ -1147,16 +1234,23 @@ show_card_grid() {
     done
 }
 
-# ponytail: catalogo con grid de tarjetas — arma data file y delega en show_card_grid
+# ponytail: catalogo con grid de tarjetas — arma data file (con marcas ♥/estado)
+# y delega en show_card_grid con hook f/w activo
 show_catalog_kitty() {
     local catalog_file="$1" img_dir="$2"
-    local data_file result
+    local data_file result slug title ep l2
     data_file=$(mktemp) || return 1
-    awk -F'\t' -v dir="$img_dir" \
-        '{ printf "%s/%s.jpg\t%s\tEp %s\t%s\t%s/%s.jpg\n", dir, $1, $2, $3, $1, dir, $1 }' \
-        "$catalog_file" > "$data_file"
-    result=$(show_card_grid "$data_file" " catálogo" portrait) || { rm -f "$data_file"; return 1; }
+    while IFS=$'\t' read -r slug title ep _; do
+        l2=$(catalog_card_l2 "jkanime:${slug}" "$ep")
+        printf '%s/%s.jpg\t%s\t%s\t%s\t%s/%s.jpg\t%s\n' \
+            "$img_dir" "$slug" "$title" "$l2" "$slug" "$img_dir" "$slug" "$ep"
+    done < "$catalog_file" > "$data_file"
+    CG_ON_KEY=browse_grid_key
+    result=$(show_card_grid "$data_file" " catálogo" portrait)
+    local rc=$?
+    CG_ON_KEY=""
     rm -f "$data_file"
+    [ "$rc" -ne 0 ] && return 1
     [ -z "$result" ] && return 1
     printf '%s' "$result"
 }
@@ -1190,23 +1284,27 @@ fetch_ep_thumb() {
 # $1 = id/slug del anime (acepta prefijos animeav1:/jkanime:) · $2 = portada fallback · stdin = ep_list
 select_episode_grid() {
     local raw_id="$1" cover_img="$2"
-    local slug eps aid tmpdir data_file ep img result last_ep pids_file
+    local slug eps aid ep_cache data_file ep img result last_ep pids_file
     slug="${raw_id#animeav1:}"; slug="${slug#jkanime:}"; slug="${slug#allanime:}"
     eps=$(cat -)
     [ -z "$eps" ] && return 1
-    aid=$(animeflv_internal_id "$slug")
-    tmpdir=$(mktemp -d) || return 1
-    data_file=$(mktemp) || { rm -rf "$tmpdir"; return 1; }
+    # latencia: no consultar animeflv (caido) si ya sabemos que la fuente es jkanime
+    aid=""
+    case "$raw_id" in jkanime:*) ;; *) aid=$(animeflv_internal_id "$slug") ;; esac
+    ep_cache="$ani_cache_dir/epthumbs"
+    mkdir -p "$ep_cache"
+    data_file=$(mktemp) || return 1
     pids_file=$(mktemp)
     for ep in $eps; do
-        fetch_ep_thumb "$ep" "$aid" "$slug" "$tmpdir/ep_$ep.jpg" &
+        [ -s "$ep_cache/${slug}_${ep}.jpg" ] && continue   # cache: inmutable por slug+ep
+        fetch_ep_thumb "$ep" "$aid" "$slug" "$ep_cache/${slug}_${ep}.jpg" &
         echo $! >> "$pids_file"
     done
     while read -r pid; do wait "$pid" 2>/dev/null; done < "$pids_file"
     rm -f "$pids_file"
     last_ep="$(last_watched_episode_for_current_anime)"
     for ep in $eps; do
-        img="$tmpdir/ep_$ep.jpg"
+        img="$ep_cache/${slug}_${ep}.jpg"
         [ -s "$img" ] || img="$cover_img"
         if [ "$ep" = "$last_ep" ]; then
             printf '%s\tEpisodio %s\t★ último visto\t%s\n' "$img" "$ep" "$ep"
@@ -1216,7 +1314,7 @@ select_episode_grid() {
     done > "$data_file"
     result=$(show_card_grid "$data_file" " episodios")
     local rc=$?
-    rm -f "$data_file"; rm -rf "$tmpdir"
+    rm -f "$data_file"
     [ "$rc" -ne 0 ] && return 1
     printf '%s' "$result"
 }
@@ -3027,6 +3125,8 @@ while [ $# -gt 0 ]; do
         --recent) search=recent ;;
         --schedule) search=schedule ;;
         --browse) search=browse ;;
+        --favs) search=favs ;;
+        --watchlist) search=watchlist ;;
         --no-detach) no_detach=1 ;;
         --exit-after-play) exit_after_play=1 && no_detach=1 ;;
         --rofi) use_external_menu=1 ;;
@@ -3064,7 +3164,7 @@ case "$(uname -o 2>/dev/null)" in
 esac
 [ "$skip_intro" = 1 ] && (dep_ch "ani-skip" || true)
 dep_ch "fzf" || true
-{ [ "$search" = "schedule" ] || [ "$search" = "browse" ]; } && dep_ch "chafa" || true
+case "$search" in schedule|browse|favs|watchlist) dep_ch "chafa" || true ;; esac
 case "$player_function" in
     debug) ;;
     download) dep_ch "ffmpeg" "aria2c" ;;
@@ -3121,17 +3221,28 @@ case "$search" in
         rm -rf "$SCHEDULE_TMPDIR" 2>/dev/null
         [ -z "$ep_no" ] && exit 1
         ;;
-    browse)
+    browse | favs | watchlist)
         fetch_browse_catalog
         [ -z "$CATALOG_FILE" ] || [ ! -s "$CATALOG_FILE" ] && die "No se pudo obtener el catalogo"
+        # CATALOG_FILE/CATALOG_TMPDIR viven en ~/.cache — no borrar
+        # favs/watchlist: mismo grid, catalogo filtrado por los archivos de estado
+        if [ "$search" = "favs" ] || [ "$search" = "watchlist" ]; then
+            state_src="$hist_dir/ani-favs"
+            [ "$search" = "watchlist" ] && state_src="$hist_dir/ani-watchlist"
+            [ -s "$state_src" ] || die "Sin entradas en $search todavia (usa f/w en el catalogo)"
+            filtered_catalog=$(mktemp)
+            awk -F'\t' 'NR==FNR { ids[$1]; next } ("jkanime:" $1) in ids' \
+                "$state_src" "$CATALOG_FILE" > "$filtered_catalog"
+            [ -s "$filtered_catalog" ] || die "Nada de tu $search esta en el catalogo actual"
+            CATALOG_FILE="$filtered_catalog"
+        fi
         result="$(show_browse_grid "$CATALOG_FILE" "$CATALOG_TMPDIR")"
-        [ -z "$result" ] && rm -rf "$CATALOG_TMPDIR" 2>/dev/null && rm -f "$CATALOG_FILE" 2>/dev/null && exit 1
+        [ -z "$result" ] && exit 1
         id=$(printf "%s" "$result" | cut -f1)
         img_path=$(printf "%s" "$result" | cut -f2)
         title=$(awk -F'\t' -v target="$id" '$1 == target { print $2; exit }' "$CATALOG_FILE")
         id="jkanime:${id}"   # catalogo viene de jkanime: prefijar para que episodes_list use el slug directo
         [ -n "$ANI_DEBUG" ] && printf 'DBG id=[%s] img=[%s] title=[%s]\n' "$id" "$img_path" "$title" >&2
-        rm -f "$CATALOG_FILE" 2>/dev/null
         allanime_title="$(printf "%s" "$title" | cut -d'(' -f1 | tr -d '[:punct:]')"
         ep_list=$(episodes_list "$id" "$title")
         [ -n "$ANI_DEBUG" ] && printf 'DBG ep_list=[%s]\n' "$(printf '%s' "$ep_list" | tr '\n' ',')" >&2
@@ -3141,7 +3252,6 @@ case "$search" in
             ep_no=$(printf "%s\n" "$ep_list" | select_episode_with_image "$img_path")
         fi
         [ -n "$ANI_DEBUG" ] && printf 'DBG ep_no=[%s]\n' "$ep_no" >&2
-        rm -rf "$CATALOG_TMPDIR" 2>/dev/null
         [ -z "$ep_no" ] && exit 1
         ;;
     *)

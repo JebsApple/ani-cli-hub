@@ -1,0 +1,6 @@
+[Unit]
+Description=Aviso de episodios nuevos (ani-cli-mx)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ani-notify

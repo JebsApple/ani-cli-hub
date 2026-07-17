@@ -10,10 +10,19 @@ Fork de ani-cli con catálogo grid (kitty graphics), fuentes en español (jkanim
 ## Correr
 
 ```bash
-ani-cli-mx --browse     # catálogo grid (alias: anime)
+ani-cli-mx --browse     # catálogo grid (alias: anime) · teclas: f fav, w watchlist
+ani-cli-mx --favs       # solo favoritos (alias: anime-favs)
+ani-cli-mx --watchlist  # solo watchlist (alias: anime-list)
 ani-cli-mx --recent     # episodios recientes (alias: anime-new)
 ani-cli-mx --schedule   # horario semanal (alias: anime-week)
 ```
+
+## Estado y caché
+
+- Favoritos: `~/.local/state/ani-cli-mx/ani-favs` (id\ttitle) · Watchlist: `ani-watchlist` (id\ttitle\testado)
+- Caché: `~/.cache/ani-cli-mx/` — catalog.tsv (TTL 6h, fallback si red caída), thumbs/ y epthumbs/ inmutables. Borrar dir = refresh forzado.
+- Notificaciones: `~/.local/bin/ani-notify` + timer user `ani-notify.timer` (30min) — avisa episodios nuevos de favs/watchlist(pendiente|viendo), dedup en cache/notified.tsv.
+- Hook de teclas del grid: `CG_ON_KEY=<func>` — recibe (key, entry TSV), devuelve nueva línea 2.
 
 ## Deploy
 

@@ -1,0 +1,46 @@
+#!/bin/bash
+# ani-notify — avisa episodios nuevos de tus favoritos/watchlist (viendo|pendiente)
+# Pensado para systemd user timer. Dedup por último episodio notificado.
+CORE=/usr/lib/ani-cli-mx/ani-cli-mx-core
+export ANI_MX_TEST=1 ANI_CLI_SKIP_TITLE="" ANI_CLI_STATE_NAME=ani-cli-mx
+source "$CORE" || exit 1
+trap - EXIT HUP INT TERM
+
+state="$ani_cache_dir/notified.tsv"
+mkdir -p "$ani_cache_dir"
+touch "$state"
+
+favs="$hist_dir/ani-favs"
+watch="$hist_dir/ani-watchlist"
+
+# ids seguidos: favoritos + watchlist en pendiente/viendo
+followed=$(
+    { [ -f "$favs" ] && cut -f1 "$favs"
+      [ -f "$watch" ] && awk -F'\t' '$3 == "viendo" || $3 == "pendiente" { print $1 }' "$watch"
+    } | sort -u
+)
+[ -z "$followed" ] && exit 0
+
+fetch_weekly_schedule || exit 0
+[ -s "$SCHEDULE_FILE" ] || exit 0
+
+new_state=$(mktemp)
+cp "$state" "$new_state"
+
+while IFS=$'\t' read -r slug title _ _ epcap; do
+    id="jkanime:${slug}"
+    printf '%s\n' "$followed" | grep -qx "$id" || continue
+    case "$epcap" in ''|'?'|*[!0-9]*) continue ;; esac
+    last=$(awk -F'\t' -v id="$id" '$1 == id { print $2; exit }' "$state")
+    [ -z "$last" ] && last=0
+    if [ "$epcap" -gt "$last" ]; then
+        notify-send -a ani-cli-mx "Nuevo episodio" "$title — Episodio $epcap" 2>/dev/null
+        grep -v "^$id	" "$new_state" > "$new_state.t" && mv "$new_state.t" "$new_state"
+        printf '%s\t%s\n' "$id" "$epcap" >> "$new_state"
+    fi
+done < "$SCHEDULE_FILE"
+
+mv "$new_state" "$state"
+rm -f "$SCHEDULE_FILE" 2>/dev/null
+rm -rf "$SCHEDULE_TMPDIR" 2>/dev/null
+exit 0
