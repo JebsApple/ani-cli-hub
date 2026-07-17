@@ -38,6 +38,10 @@ for total in 1 5 200; do
         if [ $(( CG_ROWS - header_h )) -ge 9 ]; then
             [ "$card_h" -le $(( CG_ROWS - header_h )) ] || fail "card_h=$card_h no cabe en $((CG_ROWS-header_h))"
         fi
+        # con espacio para 2 tarjetas mínimas, nunca mostrar una sola fila
+        if [ $(( CG_ROWS - header_h )) -ge 22 ]; then
+            [ "$vis_rows" -ge 2 ] || fail "vis_rows=1 con espacio para 2 (rows=$CG_ROWS card_h=$card_h)"
+        fi
         [ "$ncols" -ge 1 ]            || fail "ncols=$ncols < 1"
         if [ "$ncols" -gt 1 ]; then
             [ "$card_w" -ge "$min_card_w" ] || fail "card_w=$card_w < min con ncols=$ncols"

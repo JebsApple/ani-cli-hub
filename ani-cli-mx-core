@@ -1041,6 +1041,16 @@ _cg_geom() {
         img_h=$(( card_h - title_rows - 3 ))
     fi
     vis_rows=$(( (term_rows - header_h) / card_h ))
+    # ventanas medianas (modo ventana Hyprland): si solo cabe 1 fila pero hay
+    # espacio para 2 con tarjetas mas chicas, achicar la imagen y mostrar 2
+    if [ "$vis_rows" -eq 1 ]; then
+        local half_h=$(( (term_rows - header_h) / 2 ))
+        if [ "$half_h" -ge 11 ]; then   # 11 = img minima 6 + titulos 2 + bordes/gap 3
+            card_h=$half_h
+            img_h=$(( card_h - title_rows - 3 ))
+            vis_rows=2
+        fi
+    fi
     [ "$vis_rows" -lt 1 ] && vis_rows=1
     vrows=$(( (total + ncols - 1) / ncols ))
     # clamp: seleccion y viewport validos tras el resize
@@ -1102,8 +1112,9 @@ show_card_grid() {
         t1="${l1:0:$maxw}"
         [ "${#l1}" -gt "$maxw" ] && t1="${t1:0:$(( maxw - 1 ))}…"
         t2="${l2:0:$maxw}"
-        tput cup $(( cy + img_h + 1 )) $(( cx + 2 )) >/dev/tty; printf '%s%s%s' "$c_title" "$t1" "$c_r" >/dev/tty
-        tput cup $(( cy + img_h + 2 )) $(( cx + 2 )) >/dev/tty; printf '%s%s%s' "$c_meta" "$t2" "$c_r" >/dev/tty
+        # pad al ancho completo: al actualizar en vivo (f/w) borra el texto anterior
+        tput cup $(( cy + img_h + 1 )) $(( cx + 2 )) >/dev/tty; printf '%s%-*s%s' "$c_title" "$maxw" "$t1" "$c_r" >/dev/tty
+        tput cup $(( cy + img_h + 2 )) $(( cx + 2 )) >/dev/tty; printf '%s%-*s%s' "$c_meta" "$maxw" "$t2" "$c_r" >/dev/tty
     }
     _cg_header() {
         local extra=""
