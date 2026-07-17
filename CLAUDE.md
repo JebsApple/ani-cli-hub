@@ -10,12 +10,14 @@ Fork de ani-cli con catálogo grid (kitty graphics), fuentes en español (jkanim
 ## Correr
 
 ```bash
-ani-cli-mx --browse     # catálogo grid (alias: anime) · teclas: f fav, w watchlist
-ani-cli-mx --favs       # solo favoritos (alias: anime-favs)
-ani-cli-mx --watchlist  # solo watchlist (alias: anime-list)
-ani-cli-mx --recent     # episodios recientes (alias: anime-new)
-ani-cli-mx --schedule   # horario semanal (alias: anime-week)
+ani-cli-mx --browse     # hub con tabs (alias: anime) · f fav · w watchlist
+ani-cli-mx --favs       # hub en tab Favoritos (alias: anime-favs)
+ani-cli-mx --watchlist  # hub en tab Lista (alias: anime-list)
+ani-cli-mx --recent     # hub en tab Recientes (alias: anime-new) · Enter = play directo
+ani-cli-mx --schedule   # horario semanal standalone (alias: anime-week)
 ```
+
+Hub (kitty): tabs `1 Catálogo · 2 Recientes · 3 Favoritos · 4 Lista · 5 Semana` — número salta, Tab cicla. Cancelar episodios vuelve al hub. Sin kitty: flujos fzf clásicos sin tabs.
 
 ## Estado y caché
 
@@ -52,5 +54,6 @@ t/verify.sh
 ## Decisiones registradas
 
 - Residuo de división entera del ancho queda en el margen derecho (< ncols celdas). Tolerado y testeado.
-- animeflv de capa caída (2026-07): catálogo viene de jkanime (scraper del horario, dedup); thumbs de episodio jkanime og:image primero, animeflv screenshots fallback.
+- animeflv de capa caída (2026-07): TODO viene de jkanime — catálogo (horario dedup), recientes (home, cache 30min), thumbs de episodio (og:image). animeav1 es fallback de episodios/links; animeflv solo último recurso.
+- Tabs del grid: `CG_TABS="A|B|C"` + `CG_TAB_ACTIVE=n` → barra en línea 0, teclas 1-9/Tab emiten `TAB:n` como payload.
 - Sin píxeles en tests: el escalado interno es de icat (upstream); lo nuestro — rectángulos de celdas — se verifica completo vía placeholders.

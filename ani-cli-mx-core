@@ -891,15 +891,26 @@ search_animeav1_variants() {
     done | awk '!seen[$0]++'
 }
 
+# ponytail: ultimos capitulos desde jkanime home (animeflv de capa caida)
+# output: slug\ttitle\tep\tthumb_url · cache TTL 30min
 fetch_recent_releases() {
-    animeflv_request "$allanime_refr" | tr '\n' ' ' |
-        sed 's|<li>|\n<li>|g' |
-        sed -nE 's|.*<a href="/ver/([^"]+)".*<span class="Capi">Episodio ([^<]+)</span>.*<strong class="Title">([^<]+)</strong>.*|\1\t\2\t\3|p' |
-        while IFS=$'\t' read -r url_path ep_raw title; do
-            ep_no=$(printf '%s' "$ep_raw" | sed 's/[^0-9.]//g')
-            slug=$(printf '%s' "$url_path" | sed -E "s/-${ep_no}$//")
-            printf '%s\t%s\t%s\n' "$slug" "$title" "$ep_no"
-        done
+    local recent_cache="$ani_cache_dir/recent.tsv"
+    mkdir -p "$ani_cache_dir"
+    if [ -s "$recent_cache" ] && [ -n "$(find "$recent_cache" -mmin -30 2>/dev/null)" ]; then
+        cat "$recent_cache"
+        return 0
+    fi
+    jkanime_request "$jkanime_refr" | tr '\n' ' ' |
+        sed 's|<div class="card |\n@C@|g' |
+        sed -nE 's|.*href="https://jkanime\.net/([a-z0-9-]+)/([0-9.]+)/".*src="([^"]+)".*alt="(.+) - [0-9.]+".*|\1\t\4\t\2\t\3|p' |
+        awk -F'\t' '!seen[$1 $3]++' > "$recent_cache.new"
+    if [ -s "$recent_cache.new" ]; then
+        mv "$recent_cache.new" "$recent_cache"
+    else
+        rm -f "$recent_cache.new"
+        [ -s "$recent_cache" ] || return 1   # sin red y sin cache
+    fi
+    cat "$recent_cache"
 }
 
 # ponytail: cache persistente (latencia) — catalogo TTL 6h, thumbs inmutables por slug
@@ -1119,7 +1130,24 @@ show_card_grid() {
     _cg_header() {
         local extra=""
         [ -n "$CG_ON_KEY" ] && extra=" · f ♥ · w lista"
-        tput cup 0 "$margin_x" >/dev/tty
+        # linea 0: tabs de navegacion (si el caller las define via CG_TABS)
+        if [ -n "$CG_TABS" ]; then
+            tput cup 0 "$margin_x" >/dev/tty
+            tput el >/dev/tty
+            local i=0 tab out=""
+            local IFS_BAK=$IFS; IFS='|'
+            for tab in $CG_TABS; do
+                if [ "$i" = "${CG_TAB_ACTIVE:-0}" ]; then
+                    out="${out}${c_accent} ${tab} ${c_r}"
+                else
+                    out="${out}${c_dim} $(( i + 1 )) ${tab} ${c_r}"
+                fi
+                i=$(( i + 1 ))
+            done
+            IFS=$IFS_BAK
+            printf '%s%s(Tab cambia)%s' "$out" "$c_dim" "$c_r" >/dev/tty
+        fi
+        tput cup 1 "$margin_x" >/dev/tty
         tput el >/dev/tty
         printf '%s%s%s · %d títulos · fila %d/%d %s· ←↑↓→ mover · Enter ver%s · q salir%s' \
             "$c_accent" "$header_label" "$c_r$c_title" "$total" $(( sel / ncols + 1 )) "$vrows" "$c_meta" "$extra" "$c_r" >/dev/tty
@@ -1235,6 +1263,22 @@ show_card_grid() {
                         _cg_card $(( sel - top * ncols )) "$sel"
                     fi
                 fi ;;
+            [1-9]|$'\t')
+                # tabs: numero directo o Tab cicla — emite TAB:<idx> para el caller
+                if [ -n "$CG_TABS" ]; then
+                    local ntabs tgt
+                    ntabs=$(printf '%s' "$CG_TABS" | awk -F'|' '{ print NF }')
+                    if [ "$key" = $'\t' ]; then
+                        tgt=$(( (${CG_TAB_ACTIVE:-0} + 1) % ntabs ))
+                    else
+                        tgt=$(( key - 1 ))
+                    fi
+                    if [ "$tgt" -ge 0 ] && [ "$tgt" -lt "$ntabs" ] && [ "$tgt" != "${CG_TAB_ACTIVE:-0}" ]; then
+                        _cg_cleanup
+                        printf 'TAB:%d' "$tgt"
+                        return 0
+                    fi
+                fi ;;
             ''|$'\n')
                 entry="${entries[$sel]}"
                 _cg_cleanup
@@ -1263,6 +1307,39 @@ show_catalog_kitty() {
     rm -f "$data_file"
     [ "$rc" -ne 0 ] && return 1
     [ -z "$result" ] && return 1
+    printf '%s' "$result"
+}
+
+# ponytail: grid de recientes — thumbnails de video por episodio, seleccion = play directo
+# payload: slug\timg\tep · TAB:* pasa directo al caller
+show_recent_grid() {
+    local recent_list data_file result slug title ep thumb img l2 pids_file
+    recent_list=$(fetch_recent_releases) || return 1
+    [ -z "$recent_list" ] && return 1
+    local ep_cache="$ani_cache_dir/epthumbs"
+    mkdir -p "$ep_cache"
+    pids_file=$(mktemp)
+    while IFS=$'\t' read -r slug title ep thumb; do
+        img="$ep_cache/${slug}_${ep}.jpg"
+        [ -s "$img" ] && continue
+        curl -s -f --connect-timeout 5 --max-time 10 -o "$img" "$thumb" &
+        echo $! >> "$pids_file"
+    done <<< "$recent_list"
+    while read -r pid; do wait "$pid" 2>/dev/null; done < "$pids_file"
+    rm -f "$pids_file"
+    data_file=$(mktemp) || return 1
+    while IFS=$'\t' read -r slug title ep thumb; do
+        img="$ep_cache/${slug}_${ep}.jpg"
+        [ -s "$img" ] || img="$ani_cache_dir/thumbs/${slug}.jpg"
+        l2=$(catalog_card_l2 "jkanime:${slug}" "$ep")
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$img" "$title" "$l2" "$slug" "$img" "$ep"
+    done <<< "$recent_list" > "$data_file"
+    CG_ON_KEY=browse_grid_key
+    result=$(show_card_grid "$data_file" " recientes" landscape)
+    local rc=$?
+    CG_ON_KEY=""
+    rm -f "$data_file"
+    [ "$rc" -ne 0 ] && return 1
     printf '%s' "$result"
 }
 
@@ -2619,7 +2696,7 @@ episodes_list() {
 
     selected_site="$(site_name_from_ref "$1" 2>/dev/null || true)"
     episodes=""
-    for site_name in "$selected_site" animeav1 jkanime allanime; do
+    for site_name in "$selected_site" jkanime animeav1 allanime; do
         [ -n "$site_name" ] || continue
         [ -n "$episodes" ] && break
         episodes="$(episodes_list_for_source "$site_name" "$1" "$2")"
@@ -3175,7 +3252,7 @@ case "$(uname -o 2>/dev/null)" in
 esac
 [ "$skip_intro" = 1 ] && (dep_ch "ani-skip" || true)
 dep_ch "fzf" || true
-case "$search" in schedule|browse|favs|watchlist) dep_ch "chafa" || true ;; esac
+case "$search" in schedule|browse|favs|watchlist|recent) dep_ch "chafa" || true ;; esac
 case "$player_function" in
     debug) ;;
     download) dep_ch "ffmpeg" "aria2c" ;;
@@ -3186,6 +3263,8 @@ case "$player_function" in
 esac
 
 # searching
+# con kitty, --recent entra al hub con la tab Recientes activa
+[ "$search" = "recent" ] && has_kitty_graphics && search=recent-hub
 case "$search" in
     history)
         anime_list=$(while read -r ep_no id title; do process_hist_entry & done <"$histfile")
@@ -3209,6 +3288,7 @@ case "$search" in
         id=$(printf "%s" "$result" | cut -f1)
         title=$(printf "%s\n" "$recent_list" | awk -F '\t' -v target="$id" '$1 == target { print $2; exit }')
         ep_no=$(printf "%s\n" "$recent_list" | awk -F '\t' -v target="$id" '$1 == target { print $3; exit }')
+        id="jkanime:${id}"
         allanime_title="$(printf "%s" "$title" | cut -d'(' -f1 | tr -d '[:punct:]')"
         ep_list=$(episodes_list "$id" "$title")
         ;;
@@ -3232,36 +3312,104 @@ case "$search" in
         rm -rf "$SCHEDULE_TMPDIR" 2>/dev/null
         [ -z "$ep_no" ] && exit 1
         ;;
-    browse | favs | watchlist)
-        fetch_browse_catalog
-        [ -z "$CATALOG_FILE" ] || [ ! -s "$CATALOG_FILE" ] && die "No se pudo obtener el catalogo"
-        # CATALOG_FILE/CATALOG_TMPDIR viven en ~/.cache — no borrar
-        # favs/watchlist: mismo grid, catalogo filtrado por los archivos de estado
-        if [ "$search" = "favs" ] || [ "$search" = "watchlist" ]; then
-            state_src="$hist_dir/ani-favs"
-            [ "$search" = "watchlist" ] && state_src="$hist_dir/ani-watchlist"
-            [ -s "$state_src" ] || die "Sin entradas en $search todavia (usa f/w en el catalogo)"
-            filtered_catalog=$(mktemp)
-            awk -F'\t' 'NR==FNR { ids[$1]; next } ("jkanime:" $1) in ids' \
-                "$state_src" "$CATALOG_FILE" > "$filtered_catalog"
-            [ -s "$filtered_catalog" ] || die "Nada de tu $search esta en el catalogo actual"
-            CATALOG_FILE="$filtered_catalog"
-        fi
-        result="$(show_browse_grid "$CATALOG_FILE" "$CATALOG_TMPDIR")"
-        [ -z "$result" ] && exit 1
-        id=$(printf "%s" "$result" | cut -f1)
-        img_path=$(printf "%s" "$result" | cut -f2)
-        title=$(awk -F'\t' -v target="$id" '$1 == target { print $2; exit }' "$CATALOG_FILE")
-        id="jkanime:${id}"   # catalogo viene de jkanime: prefijar para que episodes_list use el slug directo
-        [ -n "$ANI_DEBUG" ] && printf 'DBG id=[%s] img=[%s] title=[%s]\n' "$id" "$img_path" "$title" >&2
+    browse | favs | watchlist | recent-hub)
+        # ── hub con tabs (kitty): Catálogo · Recientes · Favoritos · Lista · Semana ──
+        # sin kitty: comportamiento clasico de un solo grid fzf (sin tabs)
+        case "$search" in browse) hub_view=0 ;; recent-hub) hub_view=1 ;; favs) hub_view=2 ;; watchlist) hub_view=3 ;; esac
+        hub_tabs="Catálogo|Recientes|Favoritos|Lista|Semana"
+        ep_no=""
+        while :; do
+            case "$hub_view" in
+            0 | 2 | 3)
+                fetch_browse_catalog
+                { [ -z "$CATALOG_FILE" ] || [ ! -s "$CATALOG_FILE" ]; } && die "No se pudo obtener el catalogo"
+                # CATALOG_FILE/CATALOG_TMPDIR viven en ~/.cache — no borrar
+                work_catalog="$CATALOG_FILE"
+                if [ "$hub_view" != "0" ]; then
+                    state_src="$hist_dir/ani-favs"
+                    [ "$hub_view" = "3" ] && state_src="$hist_dir/ani-watchlist"
+                    filtered_catalog=$(mktemp)
+                    [ -s "$state_src" ] && awk -F'\t' 'NR==FNR { ids[$1]; next } ("jkanime:" $1) in ids' \
+                        "$state_src" "$CATALOG_FILE" > "$filtered_catalog"
+                    if [ ! -s "$filtered_catalog" ]; then
+                        rm -f "$filtered_catalog"
+                        if has_kitty_graphics; then
+                            printf '\33[2K\r\033[1;33mSin entradas aqui todavia — usa f/w en el catalogo\033[0m' >&2
+                            sleep 1.2
+                            hub_view=0
+                            continue
+                        fi
+                        die "Sin entradas en $search todavia (usa f/w en el catalogo)"
+                    fi
+                    work_catalog="$filtered_catalog"
+                fi
+                if has_kitty_graphics; then
+                    CG_TABS="$hub_tabs"; CG_TAB_ACTIVE=$hub_view
+                fi
+                result="$(show_browse_grid "$work_catalog" "$CATALOG_TMPDIR")"
+                CG_TABS=""
+                case "$result" in
+                    TAB:*) hub_view="${result#TAB:}"; continue ;;
+                    "") exit 1 ;;
+                esac
+                id=$(printf "%s" "$result" | cut -f1)
+                img_path=$(printf "%s" "$result" | cut -f2)
+                title=$(awk -F'\t' -v target="$id" '$1 == target { print $2; exit }' "$work_catalog")
+                id="jkanime:${id}"   # catalogo viene de jkanime: prefijar para que episodes_list use el slug directo
+                [ -n "$ANI_DEBUG" ] && printf 'DBG id=[%s] img=[%s] title=[%s]\n' "$id" "$img_path" "$title" >&2
+                ep_list=$(episodes_list "$id" "$title")
+                if has_kitty_graphics; then
+                    ep_no=$(printf "%s\n" "$ep_list" | select_episode_grid "$id" "$img_path")
+                else
+                    ep_no=$(printf "%s\n" "$ep_list" | select_episode_with_image "$img_path")
+                fi
+                # cancelar en episodios (q/Esc): volver al hub, no salir
+                [ -z "$ep_no" ] && { has_kitty_graphics && continue; exit 1; }
+                break
+                ;;
+            1)  # Recientes: seleccion = play directo del episodio
+                CG_TABS="$hub_tabs"; CG_TAB_ACTIVE=1
+                result="$(show_recent_grid)"
+                CG_TABS=""
+                case "$result" in
+                    TAB:*) hub_view="${result#TAB:}"; continue ;;
+                    "") exit 1 ;;
+                esac
+                id=$(printf "%s" "$result" | cut -f1)
+                img_path=$(printf "%s" "$result" | cut -f2)
+                ep_no=$(printf "%s" "$result" | cut -f3)
+                title=$(fetch_recent_releases | awk -F'\t' -v s="$id" '$1 == s { print $2; exit }')
+                id="jkanime:${id}"
+                ep_list=$(episodes_list "$id" "$title")
+                break
+                ;;
+            4)  # Semana: selector de dia clasico; cancelar vuelve al hub
+                fetch_weekly_schedule
+                if [ -z "$SCHEDULE_FILE" ] || [ ! -s "$SCHEDULE_FILE" ]; then
+                    hub_view=0; continue
+                fi
+                result="$(show_schedule_with_thumbnails "$SCHEDULE_FILE")"
+                if [ -z "$result" ]; then
+                    rm -f "$SCHEDULE_FILE"; rm -rf "$SCHEDULE_TMPDIR" 2>/dev/null
+                    hub_view=0; continue
+                fi
+                id=$(printf "%s" "$result" | cut -f1)
+                img_path=$(printf "%s" "$result" | cut -f2)
+                title=$(awk -F'\t' -v target="$id" '$1 == target { print $2; exit }' "$SCHEDULE_FILE")
+                id="jkanime:${id}"
+                rm -f "$SCHEDULE_FILE"; rm -rf "$SCHEDULE_TMPDIR" 2>/dev/null
+                ep_list=$(episodes_list "$id" "$title")
+                if has_kitty_graphics; then
+                    ep_no=$(printf "%s\n" "$ep_list" | select_episode_grid "$id" "$img_path")
+                else
+                    ep_no=$(printf "%s\n" "$ep_list" | select_episode_with_image "$img_path")
+                fi
+                [ -z "$ep_no" ] && { hub_view=0; continue; }
+                break
+                ;;
+            esac
+        done
         allanime_title="$(printf "%s" "$title" | cut -d'(' -f1 | tr -d '[:punct:]')"
-        ep_list=$(episodes_list "$id" "$title")
-        [ -n "$ANI_DEBUG" ] && printf 'DBG ep_list=[%s]\n' "$(printf '%s' "$ep_list" | tr '\n' ',')" >&2
-        if has_kitty_graphics; then
-            ep_no=$(printf "%s\n" "$ep_list" | select_episode_grid "$id" "$img_path")
-        else
-            ep_no=$(printf "%s\n" "$ep_list" | select_episode_with_image "$img_path")
-        fi
         [ -n "$ANI_DEBUG" ] && printf 'DBG ep_no=[%s]\n' "$ep_no" >&2
         [ -z "$ep_no" ] && exit 1
         ;;
