@@ -15,15 +15,24 @@ Lo que agrega este fork:
 ## Instalación
 
 ```bash
-sudo cp ani-cli-mx-core /usr/lib/ani-cli-mx/ani-cli-mx-core
-sudo chmod 755 /usr/lib/ani-cli-mx/ani-cli-mx-core
-# opcional: notificaciones
-cp extras/ani-notify ~/.local/bin/ && chmod +x ~/.local/bin/ani-notify
-cp extras/ani-notify.{service,timer} ~/.config/systemd/user/
-systemctl --user enable --now ani-notify.timer
+git clone https://github.com/JebsApple/ani-cli-hub
+cd ani-cli-hub
+./install.sh
 ```
 
-Dependencias: las de ani-cli-mx + `chafa` (fallback) + `kitty` (grid con píxeles reales) + `tmux` y `python3` (solo para el harness).
+El instalador verifica dependencias, instala core + wrapper, y ofrece activar las notificaciones.
+
+Dependencias: `curl sed grep awk fzf mpv openssl` + `chafa` (thumbnails fallback) + [kitty](https://sw.kovidgoyal.net/kitty/) (grid con píxeles reales; opcional). `tmux` y `python3` solo para el harness de tests.
+
+## Plataformas
+
+| Plataforma | Soporte |
+|---|---|
+| Linux + Kitty | Completo (grid con imágenes reales) |
+| Linux (otra terminal) | Completo — el grid usa fzf+chafa |
+| Windows + WSL2 | Funciona (detecta mpv.exe); grid en modo fallback |
+| Windows nativo | No — es un script bash |
+| Notificaciones | Solo Linux con systemd + notify-send |
 
 ## Uso
 
